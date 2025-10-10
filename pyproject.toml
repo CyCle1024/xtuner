@@ -23,6 +23,7 @@ classifiers = [
       "Topic :: Utilities",
 ]
 dependencies = [
+  "astor",
   "bitsandbytes==0.45.0",
   "datasets<4.0.0",
   "einops",
@@ -36,7 +37,7 @@ dependencies = [
   "tiktoken",
   "torch>=2.6.0",
   "torchvision",
-  "transformers==4.56.0",
+  "transformers==4.57.0",
   "cyclopts",
   "transformers_stream_generator",
   "opencv-python-headless",
@@ -45,6 +46,7 @@ dependencies = [
   "xxhash",
   "imageio",
   "timm",
+  "GitPython",
 ]
 
 [project.urls]
@@ -69,6 +71,7 @@ video = [
   "decord",
 ]
 all = [
+  "jsonlines",
   "decord",
   "ray[default]",
   "httpx",
