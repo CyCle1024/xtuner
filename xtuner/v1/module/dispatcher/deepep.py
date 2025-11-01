@@ -170,7 +170,7 @@ class DeepEPCombine(torch.autograd.Function):
         backward_previous_event: EventOverlap | None = None,
         backward_finished_event: EventOverlap | None = None,
     ) -> tuple[torch.Tensor, EventOverlap]:
-        if not (forward_previous_event is None == backward_finished_event is None == backward_previous_event is None):
+        if not ((forward_previous_event is None) == (backward_finished_event is None) == (backward_previous_event is None)):
             raise ValueError(
                 "Internal Error! `forward_previous_event`, `backward_finished_event` and `backward_previous_event` "
                 "should be all None or all not None"
