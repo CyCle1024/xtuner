@@ -192,6 +192,7 @@ class MoE(BaseModel):
             self.z_loss = None
 
         self.offload_stream = torch.cuda.Stream()
+        self.past_key_values: list[list[torch.Tensor]] | None = None
 
     def _select_non_pad_router_logits(
         self,
@@ -372,6 +373,7 @@ class MoE(BaseModel):
                     cat_hidden_states,
                     position_embeddings=cat_position_embeddings,
                     seq_ctx=cat_seq_ctx,
+                    past_key_values=self.past_key_values,
                 )
             else:
                 if cat_hidden_states is not None and not moe_forawrd:
@@ -397,12 +399,14 @@ class MoE(BaseModel):
                             *hidden_states_list,
                             position_embeddings=position_embeddings_list,
                             seq_ctx=seq_ctx_list,
+                            past_key_values=self.past_key_values,
                         )
                 else:
                     layer_results = decoder_layer(
                         *hidden_states_list,
                         position_embeddings=position_embeddings_list,
                         seq_ctx=seq_ctx_list,
+                        past_key_values=self.past_key_values,
                     )
                 hidden_states = layer_results[: len(hidden_states_list)]
                 router_logits = layer_results[len(hidden_states_list) : len(hidden_states_list) * 2]
@@ -532,6 +536,7 @@ class MoE(BaseModel):
                     hidden_states,
                     position_embeddings=position_embeddings,
                     seq_ctx=seq_ctx,
+                    past_key_values=self.past_key_values,
                 )
             else:
                 if int(os.getenv("XTUNER_ACTIVATION_OFFLOAD", "0")) == 1:
@@ -546,6 +551,7 @@ class MoE(BaseModel):
                             hidden_states,
                             position_embeddings=position_embeddings,
                             seq_ctx=seq_ctx,
+                            past_key_values=self.past_key_values,
                         )
 
                 else:
@@ -553,6 +559,7 @@ class MoE(BaseModel):
                         hidden_states,
                         position_embeddings=position_embeddings,
                         seq_ctx=seq_ctx,
+                        past_key_values=self.past_key_values,
                     )
                 hidden_states, router_results, router_weights = layer_results
                 output["router_logits"][f"layer{idx}"] = router_results
@@ -658,6 +665,14 @@ class MoE(BaseModel):
     def build_rotary_embedding(self, config: MoEConfig) -> RotaryEmbeddingProtocol:
         with torch.device(DEVICE):
             return get_rope_embedding(config=config)
+
+    def build_kv_cache(self, max_batch_size, max_length, block_size=256) -> None:
+        self.past_key_values = []
+        for layer in self.layers.values():
+            layer = cast(MoEDecoderLayer, layer)
+            self.past_key_values.append(
+                list(layer.build_kv_cache(max_batch_size=max_batch_size, max_length=max_length, block_size=block_size))
+            )
 
     @override
     def from_hf(self, hf_path: str | Path, strict: bool = True) -> tuple:

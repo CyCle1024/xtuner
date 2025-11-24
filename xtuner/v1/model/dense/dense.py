@@ -67,11 +67,20 @@ class Dense(BaseModel):
         # _init_load_spec 放到 post init 里
         self._init_load_spec()
         self._maybe_enable_compile(self.compile_cfg)
+        self.past_key_values: list[list[torch.Tensor]] | None = None
+
+    def build_kv_cache(self, max_batch_size, max_length, block_size=256) -> None:
+        self.past_key_values = []
+        for layer in self.layers.values():
+            layer = cast(DenseDecoderLayer, layer)
+            self.past_key_values.append(
+                list(layer.build_kv_cache(max_batch_size=max_batch_size, max_length=max_length, block_size=block_size))
+            )
 
     def forward(
         self,
         seq_ctx: SequenceContext,  # todo(@yehaochen): support intra layer micro-batch
-        loss_ctx: CELossContext,
+        loss_ctx: CELossContext | None = None,
     ) -> ModelOutputs:
         input_ids = seq_ctx.input_ids
         position_ids = seq_ctx.position_ids
@@ -94,6 +103,7 @@ class Dense(BaseModel):
                 hidden_states,
                 position_embeddings,
                 seq_ctx,
+                self.past_key_values,
             )
 
             if self.config.return_hidden_states:

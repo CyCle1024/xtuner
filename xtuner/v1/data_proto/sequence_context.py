@@ -5,6 +5,8 @@ import torch
 from torch.distributed.device_mesh import DeviceMesh
 from typing_extensions import Self
 
+from xtuner.v1.utils import ForwardState
+
 from .utils import pad_to_multiple_of, split_for_sequence_parallel
 
 
@@ -49,6 +51,8 @@ class SequenceContext:
     # moe routed_experts
     rollout_routed_experts: torch.Tensor | None
 
+    state: ForwardState
+
     def __init__(
         self,
         input_ids: torch.LongTensor | None,  # shape (1, seq_len)
@@ -70,6 +74,7 @@ class SequenceContext:
         inputs_embeds: torch.FloatTensor | None = None,
         num_img_tokens: list[int] | None = None,
         rollout_routed_experts: torch.Tensor | None = None,
+        state: ForwardState = ForwardState.TRAINING,
     ):
         # Only to distinguish parameters accepted by the constructor from attributes. For example, for `max_length_q`,
         # the argument can be an int, but as an attribute it can only be a tensor
@@ -110,6 +115,7 @@ class SequenceContext:
                 position_ids = split_for_sequence_parallel(position_ids, dim=1, sp_mesh=self.sequence_parallel_mesh)  # type: ignore
 
         self.position_ids = position_ids
+        self.state = state
 
     @classmethod
     def from_input_ids(
@@ -118,22 +124,31 @@ class SequenceContext:
         block_table: torch.Tensor | None = None,
         sp_mesh: DeviceMesh | None = None,
         device: str = "cuda",
+        state: ForwardState = ForwardState.TRAINING,
+        past_kv_lens: tuple[int, ...] | None = None,
     ) -> Self:
         assert isinstance(input_ids, (list, tuple))
         for ids in input_ids:
             assert ids.shape[0] == 1, "input_ids must have batch size of 1"
         num_tokens = [x.numel() for x in input_ids]
 
-        cu_seq_lens = cast(torch.IntTensor, torch.cumsum(torch.LongTensor([0] + num_tokens), dim=0).to(device).int())
+        cu_seq_lens_q = cast(torch.IntTensor, torch.cumsum(torch.LongTensor([0] + num_tokens), dim=0).to(device).int())
+        cu_seq_lens_k = cu_seq_lens_q
+        if state == ForwardState.DECODING:
+            assert past_kv_lens is not None
+            cu_seq_lens_k = cast(
+                torch.IntTensor, torch.cumsum(torch.LongTensor([0] + list(past_kv_lens)), dim=0).to(device).int()
+            )
         return cls(
             input_ids=cast(torch.LongTensor, torch.cat(input_ids, dim=1).to(device)),
-            cu_seq_lens_k=cu_seq_lens,
-            cu_seq_lens_q=cu_seq_lens,
-            max_length_q=cast(int, (cu_seq_lens[1:] - cu_seq_lens[:-1]).max().item()),
-            max_length_k=cast(int, (cu_seq_lens[1:] - cu_seq_lens[:-1]).max().item()),
+            cu_seq_lens_k=cu_seq_lens_k,
+            cu_seq_lens_q=cu_seq_lens_q,
+            max_length_q=cast(int, (cu_seq_lens_q[1:] - cu_seq_lens_q[:-1]).max().item()),
+            max_length_k=cast(int, (cu_seq_lens_k[1:] - cu_seq_lens_k[:-1]).max().item()),
             block_table=block_table,
             sequence_parallel_mesh=sp_mesh,
             device=device,
+            state=state,
         )
 
     def split(self, sequence_parallel_mesh: DeviceMesh | None = None) -> Self:
@@ -193,6 +208,7 @@ class SequenceContext:
                 inputs_embeds=self.inputs_embeds,
                 num_img_tokens=self.num_img_tokens,
                 rollout_routed_experts=self.rollout_routed_experts,
+                state=self.state,
             )
             return sp_seq_ctx
         else:
@@ -264,6 +280,7 @@ class SequenceContext:
             image_grid_thw=torch.cat(image_grid_thw, dim=0) if image_grid_thw else None,  # type: ignore
             position_ids=torch.cat(position_ids, dim=-1) if position_ids else None,  # type: ignore
             rollout_routed_experts=rollout_routed_experts if len(rollout_routed_experts) > 0 else None,  # type: ignore
+            state=sequence_context_list[0].state,
         )
 
     @property
@@ -314,6 +331,7 @@ class SequenceContext:
                 block_table=block_table,
                 device=self.device,
                 sequence_parallel_mesh=self.sequence_parallel_mesh,
+                state=self.state,
             )
             # fmt: on
             attn_meta_list.append(_meta)

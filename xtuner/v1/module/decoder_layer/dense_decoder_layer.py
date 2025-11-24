@@ -1,3 +1,4 @@
+from contextlib import nullcontext
 from typing import Literal
 
 import torch
@@ -76,82 +77,31 @@ class DenseDecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         position_embeddings: tuple[torch.Tensor, torch.Tensor],
         seq_ctx: SequenceContext,
+        past_key_values: list[list[torch.Tensor]] | None = None,
     ) -> torch.Tensor:
-        residual = hidden_states
+        context = nullcontext() if seq_ctx.state == ForwardState.TRAINING else torch.inference_mode()
+        with context:
+            residual = hidden_states
 
-        hidden_states = self.input_layernorm(hidden_states)
+            hidden_states = self.input_layernorm(hidden_states)
 
-        # Self Attention
-        attn_outputs: AttnOutputs = self.self_attn(
-            hidden_states=hidden_states,
-            position_embeddings=position_embeddings,
-            seq_ctx=seq_ctx,
-        )
-        hidden_states = attn_outputs["projected_output"]
-        hidden_states = residual + hidden_states
+            # Self Attention
+            attn_outputs: AttnOutputs = self.self_attn(
+                hidden_states=hidden_states,
+                position_embeddings=position_embeddings,
+                seq_ctx=seq_ctx,
+                past_key_values=past_key_values,
+            )
+            hidden_states = attn_outputs["projected_output"]
+            hidden_states = residual + hidden_states
 
-        # Fully Connected
-        residual = hidden_states
-        hidden_states = self.post_attention_layernorm(hidden_states)
-        hidden_states = self.mlp(hidden_states)
-        hidden_states = residual + hidden_states
+            # Fully Connected
+            residual = hidden_states
+            hidden_states = self.post_attention_layernorm(hidden_states)
+            hidden_states = self.mlp(hidden_states)
+            hidden_states = residual + hidden_states
 
-        return hidden_states
-
-    def prefilling(
-        self,
-        hidden_states: torch.Tensor,
-        position_embeddings: tuple[torch.Tensor, torch.Tensor],
-        seq_ctx: SequenceContext,
-        past_key_values: list[list[torch.Tensor]],
-    ) -> torch.Tensor:
-        residual = hidden_states
-
-        hidden_states = self.input_layernorm(hidden_states)
-
-        # Self Attention
-        hidden_states = self.self_attn.prefilling(
-            hidden_states=hidden_states,
-            position_embeddings=position_embeddings,
-            seq_ctx=seq_ctx,
-            past_key_values=past_key_values,
-        )
-        hidden_states = residual + hidden_states
-
-        # Fully Connected
-        residual = hidden_states
-        hidden_states = self.post_attention_layernorm(hidden_states)
-        hidden_states = self.mlp(hidden_states)
-        hidden_states = residual + hidden_states
-
-        return hidden_states
-
-    def decoding(
-        self,
-        hidden_states: torch.Tensor,
-        position_embeddings: tuple[torch.Tensor, torch.Tensor],
-        seq_ctx: SequenceContext,
-    ) -> torch.Tensor:
-        residual = hidden_states
-
-        hidden_states = self.input_layernorm(hidden_states)
-
-        # Self Attention
-        hidden_states = self.self_attn.decoding(
-            hidden_states=hidden_states,
-            position_embeddings=position_embeddings,
-            seq_ctx=seq_ctx,
-            state=ForwardState.DECODING,  # type: ignore   # TODO: Fix outdated interface
-        )
-        hidden_states = residual + hidden_states
-
-        # Fully Connected
-        residual = hidden_states
-        hidden_states = self.post_attention_layernorm(hidden_states)
-        hidden_states = self.mlp(hidden_states)
-        hidden_states = residual + hidden_states
-
-        return hidden_states
+            return hidden_states
 
     def build_kv_cache(
         self, max_batch_size: int | None = None, max_length: int | None = None, block_size: int | None = None

@@ -32,7 +32,6 @@ from xtuner.v1.module.dispatcher import (
 from xtuner.v1.module.grouped_linear.moe_group_linear import build_grouped_linear
 from xtuner.v1.module.rope import RopeScalingConfig
 from xtuner.v1.ops.act_fn import get_act_fn
-from xtuner.v1.utils import ForwardState
 
 from ..linear import build_linear
 
@@ -269,6 +268,7 @@ class MoEDecoderLayer(nn.Module):
         *hidden_states: torch.Tensor,
         seq_ctx: SequenceContext | list[SequenceContext],
         position_embeddings: tuple[torch.Tensor, torch.Tensor] | list[tuple[torch.Tensor, torch.Tensor]] | None = None,
+        past_key_values: list[list[torch.Tensor]] | None = None,
     ) -> tuple[HiddenStates, RouterResults] | tuple[torch.Tensor, ...]:
         """Forward pass of the MoE decoder layer.
 
@@ -292,6 +292,7 @@ class MoEDecoderLayer(nn.Module):
                 hidden_states=hidden_states[0],
                 seq_ctx=seq_ctx,
                 position_embeddings=position_embeddings,
+                past_key_values=past_key_values,
             )
         else:
             assert isinstance(seq_ctx, list) and len(seq_ctx) == len(hidden_states), (
@@ -305,6 +306,7 @@ class MoEDecoderLayer(nn.Module):
                 hidden_states_list=list(hidden_states),
                 seq_ctx_list=seq_ctx,
                 position_embeddings_list=position_embeddings,
+                past_key_values=past_key_values,
             )
 
     def _forward(
@@ -312,12 +314,13 @@ class MoEDecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         seq_ctx: SequenceContext,
         position_embeddings: tuple[torch.Tensor, torch.Tensor],
+        past_key_values: list[list[torch.Tensor]] | None = None,
     ) -> tuple[HiddenStates, RouterLogits, RouterWeights]:
         residual, hidden_states, router_results = self._pre_moe_forward(
             hidden_states=hidden_states,
             seq_ctx=seq_ctx,
             position_embeddings=position_embeddings,
-            state=ForwardState.TRAINING,
+            past_key_values=past_key_values,
         )
 
         origin_shape = hidden_states.shape
@@ -400,6 +403,7 @@ class MoEDecoderLayer(nn.Module):
         hidden_states_list: list[torch.Tensor],
         seq_ctx_list: list[SequenceContext],
         position_embeddings_list: list[tuple[torch.Tensor, torch.Tensor]],
+        past_key_values: list[list[torch.Tensor]] | None = None,
     ) -> tuple[torch.Tensor, ...]:  # (HiddenStates, HiddenStates, RouterLogits, RouterLogits)
         origin_shape = hidden_states_list[0].shape
         assert all(hidden_states.shape == origin_shape for hidden_states in hidden_states_list), (
@@ -427,7 +431,7 @@ class MoEDecoderLayer(nn.Module):
                 hidden_states=hidden_states,
                 seq_ctx=seq_ctx,
                 position_embeddings=position_embeddings,
-                state=ForwardState.TRAINING,
+                past_key_values=past_key_values,
             )
             pre_moe_forward_out_list.append(hidden_states)
             hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
@@ -534,7 +538,6 @@ class MoEDecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         seq_ctx: SequenceContext,
         position_embeddings: tuple[torch.Tensor, torch.Tensor],
-        state: ForwardState,
         past_key_values: list[list[torch.Tensor]] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, RouterResults]:
         # NOTE: In order to allow `torch.compile` to compile the ops before and after attention as much as possible,
@@ -543,29 +546,13 @@ class MoEDecoderLayer(nn.Module):
         hidden_states = self.input_layernorm(hidden_states)
 
         # Self Attention
-        if state == ForwardState.TRAINING:
-            attn_outputs: AttnOutputs = self.self_attn(
-                hidden_states=hidden_states,
-                position_embeddings=position_embeddings,
-                seq_ctx=seq_ctx,
-            )
-            hidden_states = attn_outputs["projected_output"]
-        elif state == ForwardState.PREFILLING:
-            assert past_key_values is not None, "past_key_values should be provided in pre-filling state"
-            hidden_states = self.self_attn.prefilling(
-                hidden_states=hidden_states,
-                position_embeddings=position_embeddings,
-                seq_ctx=seq_ctx,
-                past_key_values=past_key_values,
-            )
-        elif state == ForwardState.DECODING:
-            assert past_key_values is not None, "past_key_values should be provided in decoding state"
-            hidden_states = self.self_attn.decoding(
-                hidden_states=hidden_states,
-                position_embeddings=position_embeddings,
-                seq_ctx=seq_ctx,
-                past_key_values=past_key_values,
-            )
+        attn_outputs: AttnOutputs = self.self_attn(
+            hidden_states=hidden_states,
+            position_embeddings=position_embeddings,
+            seq_ctx=seq_ctx,
+            past_key_values=past_key_values,
+        )
+        hidden_states = attn_outputs["projected_output"]
         hidden_states = residual + hidden_states
 
         # Fully Connected

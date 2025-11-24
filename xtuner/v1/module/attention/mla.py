@@ -559,6 +559,7 @@ class MultiLatentAttention(nn.Module):
         hidden_states: torch.Tensor,
         position_embeddings: tuple[torch.Tensor, torch.Tensor],
         seq_ctx: SequenceContext,
+        past_key_values: list[list[torch.Tensor]] | None = None,
     ) -> AttnOutputs:
         bsz, q_len, _ = hidden_states.size()
 
@@ -673,6 +674,7 @@ class MultiLatentAttention(nn.Module):
         hidden_states: torch.Tensor,
         position_embeddings: tuple[torch.Tensor, torch.Tensor],
         seq_ctx: SequenceContext,
+        past_key_values: list[list[torch.Tensor]] | None = None,
     ) -> AttnOutputs: ...
 
     __call__ = nn.Module.__call__

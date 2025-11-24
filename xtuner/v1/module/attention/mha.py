@@ -17,7 +17,7 @@ from xtuner.v1.float8.config import Float8Config
 from xtuner.v1.module.rope import RopeScalingConfig
 from xtuner.v1.ops import AttnOpOutputs, attn_impl_mapping, flash_attn_varlen_func, get_apply_rotary_emb
 from xtuner.v1.ops.comm.all_to_all import ulysses_all_to_all
-from xtuner.v1.utils import XTUNER_DETERMINISTIC, get_device, get_logger
+from xtuner.v1.utils import XTUNER_DETERMINISTIC, ForwardState, get_device, get_logger
 
 from ..linear import build_linear
 from ..rms_norm import RMSNorm
@@ -191,13 +191,13 @@ class MultiHeadAttention(nn.Module):
 
         self.attn_impl_func: Callable[..., AttnOpOutputs] = attn_impl_mapping[attn_impl]  # type: ignore[assignment]
 
-    def prefilling(
+    def forward_prefilling(
         self,
         hidden_states: torch.Tensor,
         position_embeddings: tuple[torch.Tensor, torch.Tensor],
         seq_ctx: SequenceContext,
         past_key_values: list[list[torch.Tensor]],
-    ) -> torch.Tensor:
+    ) -> AttnOutputs:
         input_shape = hidden_states.shape[:-1]
         hidden_shape = (*input_shape, -1, self.head_dim)
 
@@ -246,16 +246,18 @@ class MultiHeadAttention(nn.Module):
         )
 
         attn_output = attn_output.reshape(*input_shape, -1).contiguous()
-        attn_output = self.o_proj(attn_output)
-        return attn_output
+        projected_output = self.o_proj(attn_output)
+        return {
+            "projected_output": projected_output,
+        }
 
-    def decoding(
+    def forward_decoding(
         self,
         hidden_states: torch.Tensor,
         position_embeddings: tuple[torch.Tensor, torch.Tensor],
         seq_ctx: SequenceContext,
         past_key_values: list[list[torch.Tensor]],
-    ) -> torch.Tensor:
+    ) -> AttnOutputs:
         assert seq_ctx.block_table is not None
         assert self.layer_idx is not None
 
@@ -297,14 +299,17 @@ class MultiHeadAttention(nn.Module):
         )
 
         attn_output = attn_output.reshape(*input_shape, -1).contiguous()
-        attn_output = self.o_proj(attn_output)
-        return attn_output
+        projected_output = self.o_proj(attn_output)
+        return {
+            "projected_output": projected_output,
+        }
 
-    def forward(
+    def forward_training(
         self,
         hidden_states: torch.Tensor,
         position_embeddings: tuple[torch.Tensor, torch.Tensor],
         seq_ctx: SequenceContext,
+        past_key_values: list[list[torch.Tensor]] | None = None,
     ) -> AttnOutputs:
         """Forward pass for the Multi-Head Attention module.
 
@@ -322,7 +327,7 @@ class MultiHeadAttention(nn.Module):
                 states from previous forward passes. Defaults to None.
 
         Returns:
-            torch.Tensor: Output tensor after attention computation and projection.
+            AttnOutputs: Output TypedDict with projection output and other attn_op outputs.
         """
         input_shape = hidden_states.shape[:-1]
         hidden_shape = (*input_shape, -1, self.head_dim)
@@ -415,13 +420,49 @@ class MultiHeadAttention(nn.Module):
         }
         return attn_outputs
 
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        position_embeddings: tuple[torch.Tensor, torch.Tensor],
+        seq_ctx: SequenceContext,
+        past_key_values: list[list[torch.Tensor]] | None = None,
+    ) -> AttnOutputs:
+        """Training Forward pass for the Multi-Head Attention module.
+
+        This method dispatches to specific forward implementations based on the
+        attention context (training, prefilling, or decoding).
+
+        Args:
+            hidden_states (torch.Tensor): The input hidden states, typically of shape
+                (batch_size, seq_len, hidden_size).
+            position_embeddings (tuple[torch.Tensor, torch.Tensor]): Tuple containing
+                positional embedding tensors for rotary position embeddings (cos, sin).
+            seq_ctx (SequenceContext): Context information about the sequences being processed,
+                containing metadata like sequence lengths and attention masks.
+            past_key_values (list[list[torch.Tensor]] | None, optional): Cached key and value
+                states from previous forward passes. Defaults to None.
+
+        Returns:
+            AttnOutputs: Output TypedDict with projection output and other attn_op outputs.
+        """
+        if seq_ctx.state == ForwardState.TRAINING:
+            return self.forward_training(hidden_states, position_embeddings, seq_ctx)
+        elif seq_ctx.state == ForwardState.PREFILLING:
+            assert past_key_values is not None, "past_key_values must be provided for prefilling."
+            return self.forward_prefilling(hidden_states, position_embeddings, seq_ctx, past_key_values)
+        elif seq_ctx.state == ForwardState.DECODING:
+            assert past_key_values is not None, "past_key_values must be provided for decoding."
+            return self.forward_decoding(hidden_states, position_embeddings, seq_ctx, past_key_values)
+        else:
+            raise ValueError(f"Unsupported state: {seq_ctx.state}")
+
     def build_kv_cache(
         self, max_batch_size: int | None = None, max_length: int | None = None, block_size: int | None = None
     ) -> tuple[torch.Tensor, torch.Tensor]:
         head_dim = self.head_dim
         num_heads = self.num_key_value_heads
 
-        generate_config = self.generate_config
+        generate_config = self.generate_config or GenerateConfig()
         assert generate_config is not None, "Model configuration for generation is not set."
 
         max_length = max_length or generate_config.max_length
@@ -447,6 +488,7 @@ class MultiHeadAttention(nn.Module):
         hidden_states: torch.Tensor,
         position_embeddings: tuple[torch.Tensor, torch.Tensor],
         seq_ctx: SequenceContext,
+        past_key_values: list[list[torch.Tensor]] | None = None,
     ) -> AttnOutputs: ...
 
     __call__ = nn.Module.__call__

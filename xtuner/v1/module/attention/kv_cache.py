@@ -2,7 +2,7 @@
 import torch
 
 
-@torch.library.custom_op("xpuyu::fill_paged_kv_cache", mutates_args=("key_cache", "value_cache"))
+@torch.library.custom_op("xtuner::fill_paged_kv_cache", mutates_args=("key_cache", "value_cache"))
 def fill_paged_kv_cache(
     key_states: torch.Tensor,
     value_states: torch.Tensor,
@@ -15,7 +15,7 @@ def fill_paged_kv_cache(
     block_table: torch.Tensor,
 ) -> None:
     bs = block_table.size(0)
-    from lmdeploy.pytorch.kernels import fill_kv_cache
+    from lmdeploy.pytorch.kernels.cuda import fill_kv_cache
 
     fill_kv_cache(
         key_states.transpose(1, 2)[:, : cu_seq_lens_k[bs]],

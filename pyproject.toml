@@ -28,7 +28,7 @@ dependencies = [
   "datasets<4.0.0",
   "einops",
   "loguru",
-  "mmengine==0.11.0rc0",
+  "mmengine@git+https://github.com/open-mmlab/mmengine.git@v0.11.0rc0",
   "openpyxl",
   "peft>=0.14.0",
   "scikit-image",

@@ -19,6 +19,8 @@ from pydantic import BaseModel as PydanticBaseModel
 from pydantic import ConfigDict, computed_field
 from safetensors.torch import save_file
 from torch.distributed.device_mesh import DeviceMesh
+from torch.distributed.fsdp import FSDPModule
+from torch.distributed.fsdp._fully_shard._fsdp_init import _get_post_forward_mesh_info
 from torch.distributed.tensor import DTensor, Placement, Shard
 from torch.distributed.tensor._utils import compute_local_shape_and_global_offset
 from typing_extensions import NotRequired, Self, TypedDict
@@ -344,6 +346,24 @@ class BaseModel(nn.Module):
 
         if missing := {name for name, _ in self.named_parameters()} - initialized_params:
             raise RuntimeError(f"{missing} is not initialized")
+
+    def _set_reshard_after_forward(self, reshard_after_forward: bool, recurse: bool = True):
+        if getattr(self.fsdp_config, "cpu_offload", False):
+            logger.warning(
+                "Setting `reshard_after_forward` is not supported when CPU offloading is enabled. "
+                "This will be ignored."
+            )
+            return
+
+        self_module = cast(nn.Module, self)
+        modules = list(self_module.modules()) if recurse else [self_module]
+        for module in modules:
+            if isinstance(module, FSDPModule):
+                state = module._get_fsdp_state()
+                if fsdp_param_group := state._fsdp_param_group:
+                    fsdp_param_group.post_forward_mesh_info = _get_post_forward_mesh_info(
+                        reshard_after_forward, fsdp_param_group.mesh_info
+                    )
 
     def _init_load_spec(self) -> None:
         # NOTE: (yehaochen) This is a workaround to distinguish between different parameter HF loading methods
