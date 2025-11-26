@@ -244,6 +244,7 @@ class LMDeployWorker(RolloutWorker):
                 device_type=accelerator_to_device_type[self.accelerator],
                 logprobs_mode="raw_logprobs",
                 session_len=self.config.context_length,
+                cache_max_entry_count=self.config.gpu_memory_utilization,
             )
             if backend == "pytorch"
             else TurbomindEngineConfig(
@@ -252,10 +253,11 @@ class LMDeployWorker(RolloutWorker):
                 devices=[bundle_idxs % self.config.gpus_per_node for bundle_idxs in self.engine_bundle_idxs],
                 empty_init=self.config.skip_load_weights,
                 session_len=self.config.context_length,
+                cache_max_entry_count=self.config.gpu_memory_utilization,
             )
         )
         if backend == "pytorch" and self.accelerator == "NPU":
-            backend_config.eager_mode = True
+            backend_config.eager_mode = False
 
         env = dict()
         if backend == "pytorch":
@@ -274,8 +276,11 @@ class LMDeployWorker(RolloutWorker):
                         "ASCEND_SET_RT_VISIBLE_DEVICES_BY_RAY": "1",
                         "HCCL_NPU_SOCKET_PORT_RANGE": "auto",
                         "DLINFER_RESET_MOE_UPDATE_WEIGHTS": "1",
+                        "HCCL_OP_EXPANSION_MODE": "AIV",
                     }
                 )
+                if not backend_config.eager_mode:
+                    env.update({"LMD_SKIP_WARMUP": "1",})
 
             if tp_size > 1:
                 dist_addr, dist_port = self.dist_init_addr.split(":")[:2]

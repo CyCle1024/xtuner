@@ -10,7 +10,7 @@ from xtuner.v1.config import (
 from xtuner.v1.data_proto.rl_data import SampleParams
 from xtuner.v1.datasets import RLTokenizeFnConfig
 from xtuner.v1.datasets.config import DataloaderConfig, DatasetConfig
-from xtuner.v1.model.dense.qwen3 import Qwen3Dense8BConfig
+from xtuner.v1.model.moe.qwen3 import Qwen3MoE30BA3Config
 from xtuner.v1.ray.base import AcceleratorResourcesConfig
 from xtuner.v1.ray.config.worker import RolloutConfig
 from xtuner.v1.ray.dataflow import DataFlowConfig, ReplayBufferConfig
@@ -37,10 +37,10 @@ rollout_tp_size = 2
 rollout_ep_size = 1
 max_prompt_length = 512
 max_response_length = 1024
-pack_max_length = 32 * 1024
+pack_max_length = 12 * 1024
 train_optimizer_steps = 4
 hf_interval = 15
-enable_initial_evaluate = True
+enable_initial_evaluate = False
 evaluate_step = 10
 
 # grpo quick test settings for rapid accuracy validation within ~30 minutes:
@@ -75,7 +75,7 @@ rollout_config = RolloutConfig(
     dtype="bfloat16",
     tensor_parallel_size=rollout_tp_size,
     expert_parallel_size=rollout_ep_size,
-    gpu_memory_utilization=0.6,
+    gpu_memory_utilization=0.75,
 )
 
 # sampling params
@@ -127,7 +127,7 @@ replay_buffer_cfg = ReplayBufferConfig(
 
 # 5. Train worker
 # NOTE: modify model_cfg
-model_cfg = Qwen3Dense8BConfig()
+model_cfg = Qwen3MoE30BA3Config()
 optim_cfg = AdamWConfig(lr=1e-6, foreach=False)
 loss_cfg = GRPOLossConfig(
     policy_loss_cfg=dict(

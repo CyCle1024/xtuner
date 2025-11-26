@@ -51,13 +51,13 @@ current_time=$(date "+%m%d%H")
 # 取模型路径的最后一级作为model_name，取数据路径的倒数第二级作为data_name
 model_dir_name=$(basename "$MODEL_PATH")
 data_dir_name=$(basename "$(dirname "$DATA_PATH")")
-export WORK_DIR="work_dirs/${model_dir_name}_${data_dir_name}_${infer_backend_lower}"
+export WORK_DIR="work_dirs/${model_dir_name}_${data_dir_name}_${infer_backend_lower}_n${NODE_COUNT:-1}_graph"
 
 
 # 2. Launch Ray cluster
 # 根据 NODE_COUNT 分配 num_cpus, 防止内存OOM
 node_count=${NODE_COUNT:-1}
-total_cpus=$((node_count * 128))
+total_cpus=$((node_count * 256))
 
 if [ "$RAY_RANK" -eq 0 ]; then
   ray start --head \

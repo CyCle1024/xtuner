@@ -65,15 +65,16 @@ class AcceleratorResourcesConfig(BaseModel):
         if kwargs.get("accelerator") == "NPU":
             # NOTE: Ascend 910 has 16 NPUs per node
             kwargs["num_accelerators_per_node"] = 16
+        accelerator = kwargs['accelerator']
 
         assert ray.is_initialized(), "Ray must be initialized before creating AcceleratorResourcesConfig."
         available_resources = ray.available_resources()
         available_cpus = available_resources.get("CPU", 0)
         available_memory = available_resources.get("memory", 0)
-        available_gpus = available_resources.get("GPU", 0)
+        available_accelerators = available_resources.get(accelerator, 0)
 
-        assert kwargs["num_workers"] <= available_gpus, (
-            f"Not enough available GPUS in Ray cluster, available_gpus is {available_gpus} but xtuner needs {kwargs['num_workers']}."
+        assert kwargs["num_workers"] <= available_accelerators, (
+            f"Not enough available {accelerator}s in Ray cluster, available_accelerators is {available_accelerators} but xtuner needs {kwargs['num_workers']}."
         )
         # TODO: manage single controller's cpu resource to replace "10" here
         assert (kwargs["num_cpus_per_worker"] * kwargs["num_workers"]) + 10 <= available_cpus, (
