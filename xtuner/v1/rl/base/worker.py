@@ -413,6 +413,7 @@ class TrainingWorker(SingleAcceleratorWorker):
                 )
 
             if not mask.any():  # all padding tokens, skip
+                self.logger.info(f"Skip calculate logprob diff for batch {i} in rollout {rollout_idx}.")
                 continue
 
             if len(rollout_logprobs_list) > 0:
@@ -670,6 +671,10 @@ class TrainingWorker(SingleAcceleratorWorker):
         for name_list, fused_param_list in fused_gen:
             state_dict = {name: param.detach() for name, param in zip(name_list, fused_param_list)}
             if model.fsdp_config.ep_size > 1:
+                # When ep_size > 1, generator generates part of the fused param on each ep rank in one ep_group.
+                # We can all gather them to get full fused param but it would lead to a larger memory usage.
+                # So we broadcast the part fused param from each ep rank in ep_group sequentially,
+                # and update the part of the fused param sequentially to reduce memory usage.
                 ep_mesh: DeviceMesh = model.ep_mesh
                 ep_group = ep_mesh.get_group()
                 global_rank = dist.get_rank()
