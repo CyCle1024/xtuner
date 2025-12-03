@@ -230,6 +230,7 @@ class RolloutController:
         interval = len(self.workers) // active_servers_count
         active_rollout_workers = self.workers[::interval]
         self.num_workers = len(active_rollout_workers)
+        servers_per_engine = self.config.servers_per_engine
 
         set_bundle_idxs_objectref = []
         engine_mesh_list = []
@@ -242,9 +243,13 @@ class RolloutController:
             engine_mesh_list.append([meta[0] for meta in engine_workers_meta])
             activate_worker_idx += interval
         ray.get(set_bundle_idxs_objectref)
+        # set engine mesh list for each worker
+        ray.get([worker.set_engine_mesh_list.remote(engine_mesh_list) for worker in active_rollout_workers])  # type: ignore[attr-defined]
         # init dist_init_addr for each worker according to parallel settings
         init_dist_init_addrs = ray.get([worker.init_dist_port.remote() for worker in active_rollout_workers])  # type: ignore[attr-defined]
-        dist_init_addrs = self._update_dist_init_addr(nodes_per_engine, init_dist_init_addrs, self.num_gpus_per_engine)
+        dist_init_addrs = self._update_dist_init_addr(
+            nodes_per_engine, servers_per_engine, init_dist_init_addrs, self.num_gpus_per_engine
+        )
         # launch rollout servers
         worker_server_urls_map = dict(  # rank -> url
             ray.get([worker.init.remote(dist_init_addrs[i]) for i, worker in enumerate(active_rollout_workers)])
@@ -409,23 +414,31 @@ class RolloutController:
         server_thread.start()
 
     # internal functions
-    def _update_dist_init_addr(self, nodes_per_engine, dist_init_addrs, tp_size):
+    def _update_dist_init_addr(self, nodes_per_engine, servers_per_engine, dist_init_addrs, tp_size):
         """Update the distributed initialization addresses for workers.
 
         This is used to group workers that belong to the same inference engine.
 
         Args:
             nodes_per_engine (int): The number of nodes per inference engine.
+            servers_per_engine (int): The number of servers per inference engine.
             dist_init_addrs (list): The list of initial addresses.
             tp_size (int): The tensor parallel size.
 
         Returns:
             list: The updated list of distributed initialization addresses.
         """
+        # lmdeploy pytorch ep: servers_per_engine > 1
+        # sglang cross node engine: nodes_per_engine > 1
+        assert servers_per_engine == 1 or nodes_per_engine == 1
         if nodes_per_engine > 1:
             index = list(range(0, self.num_workers + 1, tp_size)) + [self.num_workers]
             for i in range(1, len(index)):
                 dist_init_addrs[index[i - 1] : index[i]] = [dist_init_addrs[index[i - 1]]] * (index[i] - index[i - 1])
+        if servers_per_engine > 1:
+            activate_servers = len(dist_init_addrs)
+            for i in range(0, activate_servers, servers_per_engine):
+                dist_init_addrs[i : i + servers_per_engine] = [dist_init_addrs[i]] * servers_per_engine
         return dist_init_addrs
 
     def _get_active_servers_count(self, infer_config: RolloutConfig, gpu_nums: int):
@@ -453,7 +466,11 @@ class RolloutController:
             if support_cross_node_comm or self.num_gpus_per_engine < gpus_per_node
             else self.num_gpus_per_engine // gpus_per_node
         )
-        active_servers_count = int((gpu_nums // self.num_gpus_per_engine) * nodes_per_engine)
+        # servers_per_engine is introduced for lmdeploy ep settings
+        # for now only lmdeploy pytorch backend with ep > 1 requires multiple servers per engine
+        active_servers_count = int(
+            (gpu_nums // self.num_gpus_per_engine) * nodes_per_engine * infer_config.servers_per_engine
+        )
         return active_servers_count, nodes_per_engine
 
     def _broadcast_to_active_workers(self, method_name: str, block: bool):
