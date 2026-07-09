@@ -475,6 +475,24 @@ class MoE(BaseModel):
         moe_info = cast(MoEBatchForwardInfo, base_info)
         return moe_info
 
+    def prepare_chunk_indices_all(self, seq_ctx: SequenceContext):
+        from concurrent.futures import ThreadPoolExecutor
+        cu_seq_lens_int64 = seq_ctx.cu_seq_lens_q.to(torch.int64).to(seq_ctx.inputs_embeds.device)
+        seq_ctx.cu_seq_lens_q = cu_seq_lens_int64
+        seq_ctx.cu_seq_lens_list = cu_seq_lens_int64.tolist()  # for compatibility with prepare_chunk_indices1
+        CHUNK_SIZES = [4, 8, 16, 32, 64, 128, 256, 512, 608 * 2]
+
+        def compute_chunk_indices(chunk_size):
+            return str(chunk_size), prepare_chunk_indices(cu_seq_lens_int64, chunk_size=chunk_size)
+    
+        with ThreadPoolExecutor() as executor:
+            chunk_indices = dict(executor.map(compute_chunk_indices, CHUNK_SIZES))
+                
+        cur_chunk_size = int(os.environ.get("CHUNK_SIZE", "64"))
+        chunk_indices_list = {str(cur_chunk_size): prepare_chunk_indices_list(cu_seq_lens_int64, chunk_size=cur_chunk_size)}
+        seq_ctx.chunk_indices = chunk_indices
+        seq_ctx.chunk_indices_list = chunk_indices_list
+
     def _micro_batch_forward(
         self,
         seq_ctx_list: list[SequenceContext],
@@ -496,6 +514,9 @@ class MoE(BaseModel):
             seq_ctx.position_ids is not None and seq_ctx.position_ids.shape[-1] == first_position_ids.shape[-1]
             for seq_ctx in seq_ctx_list
         ), "intra-layer micro-batches must have the same local sequence length"
+
+        for seq_ctx in seq_ctx_list:
+            self.prepare_chunk_indices_all(seq_ctx)
 
         # Prepare input embeddings for all micro-batches
         if seq_ctx_list[0].input_ids is None:
@@ -750,6 +771,7 @@ class MoE(BaseModel):
         input_ids = seq_ctx.input_ids
         position_ids = seq_ctx.position_ids
 
+        self.prepare_chunk_indices_all(seq_ctx)
         if input_ids is not None:
             hidden_states = self.embed_tokens(input_ids)
         else:
