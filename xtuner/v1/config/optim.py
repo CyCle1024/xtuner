@@ -78,6 +78,7 @@ class MuonConfig(OptimConfig):
     enable_all2all: Annotated[
         bool, Parameter(help="Allow all-to-all comm strategy; set False on topologies where all-to-all is unreliable")
     ] = True
+    swap: Annotated[bool, Parameter(help="Swap optimizer states to host memory.")] = False
 
     def build(self, model):
         trainable_parameters_names = model.trainable_parameters()
@@ -201,6 +202,7 @@ class MuonConfig(OptimConfig):
             use_triton=False,
             epsilon=self.eps,
             enable_all2all=self.enable_all2all,
+            swap=self.swap,
         )
 
         return optimizer
