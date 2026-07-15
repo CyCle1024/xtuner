@@ -1,4 +1,3 @@
-import os
 from functools import partial
 from typing import Literal, Protocol, TypeAlias, cast
 
@@ -234,6 +233,7 @@ class MoEDecoderLayer(nn.Module):
         ep_mesh: DeviceMesh | None = None,
         expert_tp_mesh: DeviceMesh | None = None,
         ep_tp_mesh: DeviceMesh | None = None,
+        skip_dispatch_pad_tokens: bool = False,
     ):
         super().__init__()
         self.ep_mesh = ep_mesh
@@ -242,6 +242,7 @@ class MoEDecoderLayer(nn.Module):
         self.n_routed_experts = n_routed_experts
         self.n_shared_experts = n_shared_experts
         self.hidden_factor = hidden_factor
+        self.skip_dispatch_pad_tokens = skip_dispatch_pad_tokens
 
         self.self_attn: MultiHeadAttention | MultiLatentAttention | GatedDeltaNet = attention_config.build(
             hidden_size=hidden_size,
@@ -402,10 +403,9 @@ class MoEDecoderLayer(nn.Module):
             position_embeddings=position_embeddings,
             state=ForwardState.TRAINING,
         )
-        skip_pad_tokens = os.environ.get("SKIP_PAD_TOKENS", "False") == "True"
-        if skip_pad_tokens:
-            nonpad_indices = torch.nonzero(seq_ctx.mask, as_tuple=True)[1]
-            pad_indices = torch.nonzero(~seq_ctx.mask, as_tuple=True)[1]
+        if self.skip_dispatch_pad_tokens:
+            nonpad_indices = seq_ctx.nonpad_indices
+            pad_indices = seq_ctx.pad_indices
             origin_hidden_states = hidden_states
             hidden_states = origin_hidden_states[:, nonpad_indices, :]
             pad_hidden_states = origin_hidden_states[:, pad_indices, :]
@@ -418,16 +418,16 @@ class MoEDecoderLayer(nn.Module):
         pre_dispatched = self.dispatcher.dispatch_preprocess(
             hidden_states=hidden_states.view(-1, hidden_states.shape[-1]),
             topk_ids=router_results["topk_ids"]
-            if not skip_pad_tokens
+            if not self.skip_dispatch_pad_tokens
             else router_results["topk_ids"][nonpad_indices, :],
             topk_weights=router_results["topk_weights"]
-            if not skip_pad_tokens
+            if not self.skip_dispatch_pad_tokens
             else router_results["topk_weights"][nonpad_indices, :],
         )
         dispatched = self.dispatcher.dispatch(
             pre_dispatched=pre_dispatched,
             topk_weights=router_results["topk_weights"]
-            if not skip_pad_tokens
+            if not self.skip_dispatch_pad_tokens
             else router_results["topk_weights"][nonpad_indices, :],
             decoding=False,
         )  # type: ignore[call-overload]
@@ -490,10 +490,10 @@ class MoEDecoderLayer(nn.Module):
 
         hidden_states = self._post_moe_forward(
             combined_hidden_states=combined_hidden_states,
-            residual=residual if not skip_pad_tokens else residual[:, nonpad_indices, :],
+            residual=residual if not self.skip_dispatch_pad_tokens else residual[:, nonpad_indices, :],
             shared_experts_out=shared_experts_out,
         )
-        if skip_pad_tokens:
+        if self.skip_dispatch_pad_tokens:
             result = torch.zeros_like(origin_hidden_states)
             result[:, nonpad_indices, :] = hidden_states
             result[:, pad_indices, :] = pad_hidden_states
