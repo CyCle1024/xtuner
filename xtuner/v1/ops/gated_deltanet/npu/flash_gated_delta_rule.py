@@ -2,7 +2,7 @@
 # Copyright (c) 2025, HUAWEI CORPORATION.  All rights reserved.
 
 import os
-import warnings
+from functools import lru_cache
 from typing import Dict, Optional
 
 import torch
@@ -55,6 +55,41 @@ def prepare_chunk_indices1(cu_seqlens: list[int], chunk_size: int) -> list[int]:
             indices.append(chunk_id)
 
     return indices
+
+
+@lru_cache(maxsize=8)
+def _prepare_kernel_metadata(
+    cu_seqlens: tuple[int, ...],
+    *,
+    device: str,
+    batch_size: int,
+    seq_len: int,
+    num_heads: int,
+    chunk_size: int,
+):
+    cu_seqlens_list = list(cu_seqlens)
+    if not cu_seqlens_list or cu_seqlens_list[0] != 0 or cu_seqlens_list[-1] != batch_size * seq_len:
+        raise ValueError("cu_seqlens must start at zero and end at B * T")
+
+    cumsum_base = max(1, (1 << 17) // (num_heads * chunk_size))
+    cumsum_base = ((cumsum_base + chunk_size - 1) // chunk_size) * chunk_size
+    cumsum_block_size = 1 << (cumsum_base - 1).bit_length()
+    block_sizes = {chunk_size, cumsum_block_size, 608 * 2}
+    block_sizes.update(size for size in (32, 64, 128) if size <= chunk_size)
+
+    chunk_indices = {}
+    flat_indices_by_size = {}
+    for block_size in block_sizes:
+        flat_indices = prepare_chunk_indices1(cu_seqlens_list, block_size)
+        flat_indices_by_size[block_size] = flat_indices
+        chunk_indices[str(block_size)] = torch.tensor(flat_indices, device=device, dtype=torch.int64).reshape(-1, 2)
+
+    return (
+        torch.tensor(cu_seqlens, device=device, dtype=torch.int64),
+        cu_seqlens_list,
+        chunk_indices,
+        {str(chunk_size): flat_indices_by_size[chunk_size]},
+    )
 
 
 def flash_chunk_gated_delta_rule_fwd(
@@ -355,7 +390,7 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
 
 
 @torch.compiler.disable
-def flash_gated_delta_rule(
+def flash_gated_delta_rule_native(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
@@ -372,14 +407,18 @@ def flash_gated_delta_rule(
     chunk_size: int = int(os.environ.get("CHUNK_SIZE", "64")),
     head_first: bool = False,
 ):
-    r"""
+    r"""Run the NPU-native gated delta rule.
+
+    Q/K/V use contiguous head-first layouts. ``g`` and ``beta`` remain
+    time-major, and the output is time-major.
+
     Args:
         q (torch.Tensor):
-            queries of shape `[B, T, H, K]`.
+            queries of shape `[B, H, T, K]`.
         k (torch.Tensor):
-            keys of shape `[B, T, H, K]`.
+            keys of shape `[B, H, T, K]`.
         v (torch.Tensor):
-            values of shape `[B, T, H, V]`.
+            values of shape `[B, H, T, V]`.
         g (torch.Tensor):
             (forget) gating tensor (in log space!) of shape `[B, T, H]`.
         beta (torch.Tensor):
@@ -437,29 +476,28 @@ def flash_gated_delta_rule(
             cu_seqlens=cu_seqlens
         )
     """
+    if cu_seqlens is None:
+        raise ValueError("NPU flash gated delta-rule requires cu_seqlens")
+    if cu_seqlens_list is None or chunk_indices is None or chunk_indices_list is None:
+        raise ValueError("NPU flash gated delta-rule requires prepared sequence metadata")
     cu_seqlens = cu_seqlens.to(torch.int64)
+    if q.ndim != 4 or k.ndim != 4 or v.ndim != 4:
+        raise ValueError("NPU-native q/k/v must have shape [B, H, T, D]")
+    if q.shape != k.shape or q.shape[:3] != v.shape[:3]:
+        raise ValueError(f"incompatible NPU-native q/k/v shapes: {tuple(q.shape)}, {tuple(k.shape)}, {tuple(v.shape)}")
+    if not q.is_contiguous() or not k.is_contiguous() or not v.is_contiguous():
+        raise ValueError("NPU-native q/k/v must use contiguous head-first storage")
     if q.dtype != k.dtype or k.dtype != v.dtype:
         raise ValueError(
             f"q current type is {q.dtype} , k current type is {k.dtype} ,v current type is {v.dtype} , they should are equal"
         )
     if q.dtype == torch.float32:
         raise ValueError("ChunkGatedDeltaRuleFunction does not support float32. Please use bfloat16.")
-    if len(beta.shape) != 3:
+    batch_size, num_heads, seq_len, _ = q.shape
+    if g.shape != (batch_size, seq_len, num_heads) or beta.shape != g.shape:
         raise ValueError(
-            f"beta current shape len is {len(beta.shape)}, beta must be of shape [B, T, H] if head_first=False, or [B, H, T] otherwise."
-        )
-
-    if head_first:
-        warnings.warn(
-            "head_first is deprecated and will be removed in a future version. "
-            "Please use head_first=False for now instead."
-        )
-    if not head_first and q.shape[2] < q.shape[1]:
-        warnings.warn(
-            f"Input tensor shape suggests potential format mismatch: seq_len ({q.shape[2]}) < num_heads ({q.shape[1]}). "
-            "This may indicate the inputs were passed in head-first format [B, H, T, ...] "
-            "when head_first=False was specified. "
-            "Please verify your input tensor format matches the expected shape [B, T, H, ...]."
+            "g and beta must use [B, T, H] while NPU-native q/k/v use [B, H, T, D]; "
+            f"got g={tuple(g.shape)}, beta={tuple(beta.shape)}"
         )
     if cu_seqlens is not None:
         if q.shape[0] != 1:
@@ -491,3 +529,60 @@ def flash_gated_delta_rule(
         chunk_size,
     )
     return o, final_state
+
+
+@torch.compiler.disable
+def flash_gated_delta_rule(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    g: torch.Tensor,
+    beta: torch.Tensor,
+    initial_state: Optional[torch.Tensor] = None,
+    output_final_state: bool = False,
+    use_qk_l2norm_in_kernel: bool = False,
+    cu_seqlens: Optional[torch.LongTensor] = None,
+    cu_seqlens_list: Optional[list[int]] = None,
+):
+    """Run NPU gated delta-rule with canonical ``[B, T, H, D]`` Q/K/V.
+
+    Canonical views returned by NPU causal-conv recover their original contiguous head-first storage here. Other
+    callers pay a contiguous copy only when their strides cannot represent the native layout directly.
+    """
+    if cu_seqlens is None:
+        raise ValueError("NPU chunk gated delta-rule requires cu_seqlens")
+    if cu_seqlens_list is None:
+        raise ValueError("NPU chunk gated delta-rule requires cu_seq_lens_q_list")
+    if q.ndim != 4:
+        raise ValueError(f"q must have shape [B, T, H, K], got {tuple(q.shape)}")
+    batch_size, seq_len, num_heads, _ = q.shape
+    chunk_size = int(os.environ.get("CHUNK_SIZE", "64"))
+    cu_seqlens, cu_seqlens_list, chunk_indices, chunk_indices_list = _prepare_kernel_metadata(
+        tuple(cu_seqlens_list),
+        device=str(q.device),
+        batch_size=batch_size,
+        seq_len=seq_len,
+        num_heads=num_heads,
+        chunk_size=chunk_size,
+    )
+
+    def to_native(x: torch.Tensor) -> torch.Tensor:
+        native = x.transpose(1, 2)
+        return native if native.is_contiguous() else native.contiguous()
+
+    return flash_gated_delta_rule_native(
+        to_native(q),
+        to_native(k),
+        to_native(v),
+        g=g,
+        beta=beta,
+        scale=None,
+        initial_state=initial_state,
+        output_final_state=output_final_state,
+        use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
+        cu_seqlens=cu_seqlens,
+        cu_seqlens_list=cu_seqlens_list,
+        chunk_indices=chunk_indices,
+        chunk_indices_list=chunk_indices_list,
+        chunk_size=chunk_size,
+    )
