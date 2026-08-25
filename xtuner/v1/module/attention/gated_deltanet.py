@@ -315,6 +315,11 @@ class GatedDeltaNet(nn.Module):
         query = query.reshape(batch_size, seq_len * sp_size, self.num_k_heads // sp_size, self.head_k_dim)
         key = key.reshape(batch_size, seq_len * sp_size, self.num_k_heads // sp_size, self.head_k_dim)
         value = value.reshape(batch_size, seq_len * sp_size, self.num_v_heads // sp_size, self.head_v_dim)
+        gdn_metadata = seq_ctx.gdn_metadata
+        seq_idx = gdn_metadata.seq_idx if gdn_metadata is not None else None
+        cu_seqlens_int64 = gdn_metadata.cu_seqlens_int64 if gdn_metadata is not None else None
+        chunk_indices = gdn_metadata.chunk_indices if gdn_metadata is not None else None
+        chunk_indices_list = gdn_metadata.chunk_indices_list if gdn_metadata is not None else None
         query = self.causal_conv1d_fn(
             x=query,
             weight=query_weight,
@@ -322,6 +327,9 @@ class GatedDeltaNet(nn.Module):
             activation=self.activation,
             cu_seqlens=seq_ctx.cu_seq_lens_q,
             cu_seqlens_list=seq_ctx.cu_seq_lens_q_list,
+            seq_idx=seq_idx,
+            cu_seqlens_int64=cu_seqlens_int64,
+            chunk_indices=chunk_indices,
         )
         key = self.causal_conv1d_fn(
             x=key,
@@ -330,6 +338,9 @@ class GatedDeltaNet(nn.Module):
             activation=self.activation,
             cu_seqlens=seq_ctx.cu_seq_lens_q,
             cu_seqlens_list=seq_ctx.cu_seq_lens_q_list,
+            seq_idx=seq_idx,
+            cu_seqlens_int64=cu_seqlens_int64,
+            chunk_indices=chunk_indices,
         )
         value = self.causal_conv1d_fn(
             x=value,
@@ -338,6 +349,9 @@ class GatedDeltaNet(nn.Module):
             activation=self.activation,
             cu_seqlens=seq_ctx.cu_seq_lens_q,
             cu_seqlens_list=seq_ctx.cu_seq_lens_q_list,
+            seq_idx=seq_idx,
+            cu_seqlens_int64=cu_seqlens_int64,
+            chunk_indices=chunk_indices,
         )
 
         beta = b.sigmoid()
@@ -389,6 +403,9 @@ class GatedDeltaNet(nn.Module):
             use_qk_l2norm_in_kernel=True,
             cu_seqlens=seq_ctx.cu_seq_lens_q,
             cu_seqlens_list=seq_ctx.cu_seq_lens_q_list,
+            cu_seqlens_int64=cu_seqlens_int64,
+            chunk_indices=chunk_indices,
+            chunk_indices_list=chunk_indices_list,
         )
 
         if seq_ctx.sequence_parallel_mesh and seq_ctx.sequence_parallel_mesh.size() > 1:
@@ -444,6 +461,11 @@ class GatedDeltaNet(nn.Module):
             2 * self.num_k_heads + self.num_v_heads,
             self.head_k_dim,
         )
+        gdn_metadata = seq_ctx.gdn_metadata
+        seq_idx = gdn_metadata.seq_idx if gdn_metadata is not None else None
+        cu_seqlens_int64 = gdn_metadata.cu_seqlens_int64 if gdn_metadata is not None else None
+        chunk_indices = gdn_metadata.chunk_indices if gdn_metadata is not None else None
+        chunk_indices_list = gdn_metadata.chunk_indices_list if gdn_metadata is not None else None
         mixed_qkv = self.causal_conv1d_fn(
             x=mixed_qkv,
             weight=weight,
@@ -451,6 +473,9 @@ class GatedDeltaNet(nn.Module):
             activation=self.activation,
             cu_seqlens=seq_ctx.cu_seq_lens_q,
             cu_seqlens_list=seq_ctx.cu_seq_lens_q_list,
+            seq_idx=seq_idx,
+            cu_seqlens_int64=cu_seqlens_int64,
+            chunk_indices=chunk_indices,
         )
         query, key, value = torch.split(
             mixed_qkv,
@@ -484,6 +509,9 @@ class GatedDeltaNet(nn.Module):
             use_qk_l2norm_in_kernel=True,
             cu_seqlens=seq_ctx.cu_seq_lens_q,
             cu_seqlens_list=seq_ctx.cu_seq_lens_q_list,
+            cu_seqlens_int64=cu_seqlens_int64,
+            chunk_indices=chunk_indices,
+            chunk_indices_list=chunk_indices_list,
         )
         # reshape input data into 2D tensor
         core_attn_out = core_attn_out.reshape(-1, self.head_v_dim)

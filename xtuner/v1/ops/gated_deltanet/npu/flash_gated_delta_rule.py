@@ -2,12 +2,12 @@
 # Copyright (c) 2025, HUAWEI CORPORATION.  All rights reserved.
 
 import os
-from functools import lru_cache
 from typing import Dict, Optional
 
 import torch
 import torch_npu
 
+from .metadata import get_npu_delta_rule_block_sizes, prepare_npu_metadata
 from .triton_core.chunk_scaled_dot_kkt import chunk_scaled_dot_kkt_fwd
 from .triton_core.cumsum import chunk_local_cumsum
 
@@ -22,74 +22,6 @@ from .triton_core.l2norm import l2norm_bwd, l2norm_fwd
 # from .triton_core.solve_tril import solve_tril
 from .triton_core.solve_tril_fast import solve_tril_npu as solve_tril
 from .triton_core.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
-
-
-def cdiv_torch(a, b):
-    return (a + b - 1) // b
-
-
-def prepare_lens(cu_seqlens: torch.LongTensor) -> torch.LongTensor:
-    return cu_seqlens[1:] - cu_seqlens[:-1]
-
-
-def prepare_chunk_indices(cu_seqlens: torch.LongTensor, chunk_size: int) -> torch.LongTensor:
-    indices = torch.cat([torch.arange(n) for n in cdiv_torch(prepare_lens(cu_seqlens), chunk_size).tolist()])
-    return torch.stack([indices.eq(0).cumsum(0) - 1, indices], 1).to(cu_seqlens)
-
-
-def prepare_chunk_indices1(cu_seqlens: list[int], chunk_size: int) -> list[int]:
-    indices = []
-
-    for i in range(len(cu_seqlens) - 1):
-        start = cu_seqlens[i]
-        end = cu_seqlens[i + 1]
-        length = end - start
-
-        if length <= 0:
-            continue
-
-        num_chunks = (length + chunk_size - 1) // chunk_size
-
-        for chunk_id in range(num_chunks):
-            indices.append(i)
-            indices.append(chunk_id)
-
-    return indices
-
-
-@lru_cache(maxsize=8)
-def _prepare_kernel_metadata(
-    cu_seqlens: tuple[int, ...],
-    *,
-    device: str,
-    batch_size: int,
-    seq_len: int,
-    num_heads: int,
-    chunk_size: int,
-):
-    cu_seqlens_list = list(cu_seqlens)
-    if not cu_seqlens_list or cu_seqlens_list[0] != 0 or cu_seqlens_list[-1] != batch_size * seq_len:
-        raise ValueError("cu_seqlens must start at zero and end at B * T")
-
-    cumsum_base = max(1, (1 << 17) // (num_heads * chunk_size))
-    cumsum_base = ((cumsum_base + chunk_size - 1) // chunk_size) * chunk_size
-    cumsum_block_size = 1 << (cumsum_base - 1).bit_length()
-    block_sizes = {chunk_size, cumsum_block_size, 608 * 2}
-    block_sizes.update(size for size in (32, 64, 128) if size <= chunk_size)
-
-    chunk_indices = {}
-    flat_indices_by_size = {}
-    for block_size in block_sizes:
-        flat_indices = prepare_chunk_indices1(cu_seqlens_list, block_size)
-        flat_indices_by_size[block_size] = flat_indices
-        chunk_indices[str(block_size)] = torch.tensor(flat_indices, device=device, dtype=torch.int64).reshape(-1, 2)
-
-    return (
-        torch.tensor(cu_seqlens, device=device, dtype=torch.int64),
-        cu_seqlens_list,
-        chunk_indices,
-        {str(chunk_size): flat_indices_by_size[chunk_size]},
-    )
 
 
 def flash_chunk_gated_delta_rule_fwd(
@@ -543,6 +475,9 @@ def flash_gated_delta_rule(
     use_qk_l2norm_in_kernel: bool = False,
     cu_seqlens: Optional[torch.LongTensor] = None,
     cu_seqlens_list: Optional[list[int]] = None,
+    cu_seqlens_int64: Optional[torch.Tensor] = None,
+    chunk_indices: Optional[Dict[str, torch.Tensor]] = None,
+    chunk_indices_list: Optional[Dict[str, list[int]]] = None,
 ):
     """Run NPU gated delta-rule with canonical ``[B, T, H, D]`` Q/K/V.
 
@@ -557,14 +492,28 @@ def flash_gated_delta_rule(
         raise ValueError(f"q must have shape [B, T, H, K], got {tuple(q.shape)}")
     batch_size, seq_len, num_heads, _ = q.shape
     chunk_size = int(os.environ.get("CHUNK_SIZE", "64"))
-    cu_seqlens, cu_seqlens_list, chunk_indices, chunk_indices_list = _prepare_kernel_metadata(
-        tuple(cu_seqlens_list),
-        device=str(q.device),
-        batch_size=batch_size,
-        seq_len=seq_len,
-        num_heads=num_heads,
-        chunk_size=chunk_size,
-    )
+    block_sizes = get_npu_delta_rule_block_sizes(num_heads, chunk_size)
+    required_keys = {str(block_size) for block_size in block_sizes}
+    if (
+        cu_seqlens_int64 is None
+        or chunk_indices is None
+        or chunk_indices_list is None
+        or not required_keys.issubset(chunk_indices)
+        or str(chunk_size) not in chunk_indices_list
+    ):
+        fallback_metadata = prepare_npu_metadata(
+            cu_seqlens=cu_seqlens_list,
+            device=q.device,
+            total_tokens=batch_size * seq_len,
+            block_sizes=block_sizes,
+            list_block_sizes={chunk_size},
+        )
+        cu_seqlens_int64 = fallback_metadata.cu_seqlens_int64
+        chunk_indices = fallback_metadata.chunk_indices
+        chunk_indices_list = fallback_metadata.chunk_indices_list
+    assert cu_seqlens_int64 is not None
+    assert chunk_indices is not None
+    assert chunk_indices_list is not None
 
     def to_native(x: torch.Tensor) -> torch.Tensor:
         native = x.transpose(1, 2)
@@ -580,7 +529,7 @@ def flash_gated_delta_rule(
         initial_state=initial_state,
         output_final_state=output_final_state,
         use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
-        cu_seqlens=cu_seqlens,
+        cu_seqlens=cu_seqlens_int64,
         cu_seqlens_list=cu_seqlens_list,
         chunk_indices=chunk_indices,
         chunk_indices_list=chunk_indices_list,

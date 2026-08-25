@@ -1,11 +1,11 @@
 """Ascend causal convolution autograd interface."""
 
-from functools import lru_cache
 from typing import Dict, Optional
 
 import torch
 
-from .causal_conv1d_triton_ascend import causal_conv1d_bwd_impl, causal_conv1d_fwd_impl, get_num_cores
+from ..metadata import get_npu_causal_conv1d_block_sizes, prepare_npu_metadata
+from .causal_conv1d_triton_ascend import causal_conv1d_bwd_impl, causal_conv1d_fwd_impl
 
 
 class CausalConv1dFunction(torch.autograd.Function):
@@ -111,28 +111,6 @@ def causal_conv1d_triton_native(
     )
 
 
-@lru_cache(maxsize=8)
-def _prepare_causal_conv_metadata(
-    cu_seqlens: tuple[int, ...],
-    device: str,
-    total_tokens: int,
-    forward_block_size: int,
-    backward_block_size: int,
-) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-    if not cu_seqlens or cu_seqlens[0] != 0 or cu_seqlens[-1] != total_tokens:
-        raise ValueError("cu_seqlens must start at zero and end at B * T")
-
-    chunk_indices = {}
-    for block_size in {forward_block_size, backward_block_size}:
-        pairs = []
-        for sequence_id, (start, end) in enumerate(zip(cu_seqlens, cu_seqlens[1:])):
-            pairs.extend((sequence_id, chunk_id) for chunk_id in range((end - start + block_size - 1) // block_size))
-        chunk_indices[str(block_size)] = torch.tensor(pairs, device=device, dtype=torch.int64).reshape(-1, 2)
-
-    cu_seqlens_tensor = torch.tensor(cu_seqlens, device=device, dtype=torch.int64)
-    return cu_seqlens_tensor, chunk_indices
-
-
 @torch.compiler.disable
 def causal_conv1d_triton(
     x: torch.Tensor,
@@ -141,6 +119,9 @@ def causal_conv1d_triton(
     activation: Optional[str],
     cu_seqlens: torch.Tensor,
     cu_seqlens_list: Optional[list[int]] = None,
+    seq_idx: Optional[torch.Tensor] = None,
+    cu_seqlens_int64: Optional[torch.Tensor] = None,
+    chunk_indices: Optional[Dict[str, torch.Tensor]] = None,
 ) -> torch.Tensor:
     """Apply NPU causal-conv with a ``[B, T, H, K]`` public layout."""
     if x.ndim != 4:
@@ -149,15 +130,20 @@ def causal_conv1d_triton(
     if cu_seqlens_list is None:
         raise ValueError("NPU causal-conv requires cu_seq_lens_q_list")
 
-    num_cores = int(get_num_cores())
-    tiles = 1 << (((max(16, batch_size * seq_len) + num_cores - 1) // num_cores) - 1).bit_length()
-    cu_seqlens, chunk_indices = _prepare_causal_conv_metadata(
-        tuple(cu_seqlens_list),
-        str(x.device),
-        batch_size * seq_len,
-        min(32, tiles),
-        min(4, tiles),
-    )
+    total_tokens = batch_size * seq_len
+    forward_block_size, backward_block_size = get_npu_causal_conv1d_block_sizes(total_tokens)
+    required_keys = {str(forward_block_size), str(backward_block_size)}
+    if cu_seqlens_int64 is None or chunk_indices is None or not required_keys.issubset(chunk_indices):
+        fallback_metadata = prepare_npu_metadata(
+            cu_seqlens=cu_seqlens_list,
+            device=x.device,
+            total_tokens=total_tokens,
+            block_sizes={forward_block_size, backward_block_size},
+        )
+        cu_seqlens_int64 = fallback_metadata.cu_seqlens_int64
+        chunk_indices = fallback_metadata.chunk_indices
+    assert cu_seqlens_int64 is not None
+    assert chunk_indices is not None
 
     native, _ = causal_conv1d_triton_native(
         x=x.reshape(batch_size, seq_len, num_heads * head_dim),
@@ -165,7 +151,7 @@ def causal_conv1d_triton(
         H=num_heads,
         bias=bias,
         activation=activation,
-        cu_seqlens=cu_seqlens,
+        cu_seqlens=cu_seqlens_int64,
         chunk_indices=chunk_indices,
         output_final_state=False,
     )

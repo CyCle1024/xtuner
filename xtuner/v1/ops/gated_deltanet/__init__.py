@@ -17,7 +17,11 @@ XTuner path (compile-friendly custom_op wraps + seq_idx-aware kernel dispatch).
 
 import os
 
+import torch
+
+from ...data_proto.sequence_context import GatedDeltaNetMetadata
 from ...utils import get_device
+from .gen_seq_idx import gen_seq_idx
 
 
 _TRUTHY = {"true", "1", "yes", "on"}
@@ -27,20 +31,39 @@ def _hf_impl_enabled() -> bool:
     return os.getenv("XTUNER_HF_IMPL", "").strip().lower() in _TRUTHY
 
 
-def _hf_causal_conv1d(x, weight, bias, activation, cu_seqlens, cu_seqlens_list=None):
+def _hf_causal_conv1d(
+    x,
+    weight,
+    bias,
+    activation,
+    cu_seqlens,
+    cu_seqlens_list=None,
+    seq_idx=None,
+    cu_seqlens_int64=None,
+    chunk_indices=None,
+):
     from causal_conv1d import causal_conv1d_fn as _hf_causal_conv1d_fn
 
-    del cu_seqlens
     batch_size, seq_len, num_heads, head_dim = x.shape
     x_cf = x.reshape(batch_size, seq_len, num_heads * head_dim).transpose(1, 2)
     out = _hf_causal_conv1d_fn(x=x_cf, weight=weight, bias=bias, activation=activation, seq_idx=None)
     return out.transpose(1, 2).reshape(batch_size, seq_len, num_heads, head_dim)
 
 
+def _hf_chunk_gated_delta_rule(
+    *args,
+    cu_seqlens_int64=None,
+    chunk_indices=None,
+    chunk_indices_list=None,
+    **kwargs,
+):
+    from fla.ops.gated_delta_rule import chunk_gated_delta_rule
+
+    return chunk_gated_delta_rule(*args, **kwargs)
+
+
 def get_chunk_gated_delta_rule_fn():
     if _hf_impl_enabled():
-        from fla.ops.gated_delta_rule import chunk_gated_delta_rule as _hf_chunk_gated_delta_rule
-
         return _hf_chunk_gated_delta_rule
     if get_device() == "npu":
         from .npu.flash_gated_delta_rule import flash_gated_delta_rule as _npu_chunk_gated_delta_rule
@@ -61,3 +84,27 @@ def get_causal_conv1d_fn():
     from .causal_conv1d import causal_conv1d as _xtuner_causal_conv1d_fn
 
     return _xtuner_causal_conv1d_fn
+
+
+def prepare_gated_deltanet_metadata(
+    *,
+    cu_seqlens: torch.Tensor,
+    cu_seqlens_list: list[int],
+    num_heads: int,
+) -> GatedDeltaNetMetadata | None:
+    """Prepare the current device's GatedDeltaNet metadata before layer
+    execution."""
+    if _hf_impl_enabled():
+        return None
+
+    total_tokens = cu_seqlens_list[-1]
+    if get_device() == "npu":
+        from .npu.metadata import prepare_npu_gated_deltanet_metadata
+
+        return prepare_npu_gated_deltanet_metadata(
+            cu_seqlens=cu_seqlens_list,
+            device=cu_seqlens.device,
+            total_tokens=total_tokens,
+            num_heads=num_heads,
+        )
+    return GatedDeltaNetMetadata(seq_idx=gen_seq_idx(total_tokens, cu_seqlens))

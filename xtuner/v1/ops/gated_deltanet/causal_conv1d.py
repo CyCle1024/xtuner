@@ -268,17 +268,22 @@ def causal_conv1d(
     activation: str | None,
     cu_seqlens: torch.Tensor,
     cu_seqlens_list: list[int] | None = None,
+    seq_idx: torch.Tensor | None = None,
+    cu_seqlens_int64: torch.Tensor | None = None,
+    chunk_indices: dict[str, torch.Tensor] | None = None,
 ) -> torch.Tensor:
     """Apply CUDA causal-conv with a ``[B, T, H, K]`` public layout."""
     if x.ndim != 4:
         raise ValueError(f"causal-conv input must have shape [B, T, H, K], got {tuple(x.shape)}")
     batch_size, seq_len, num_heads, head_dim = x.shape
     x_flat = x.reshape(batch_size, seq_len, num_heads * head_dim)
+    if seq_idx is None:
+        seq_idx = gen_seq_idx(seq_len, cu_seqlens)
     output = causal_conv1d_fn(
         x=x_flat,
         weight=weight,
         bias=bias,
         activation=activation,
-        seq_idx=gen_seq_idx(seq_len, cu_seqlens),
+        seq_idx=seq_idx,
     )
     return output.reshape(batch_size, seq_len, num_heads, head_dim)
