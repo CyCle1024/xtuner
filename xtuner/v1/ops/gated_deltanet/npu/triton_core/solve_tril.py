@@ -1,4 +1,7 @@
-# -*- coding: utf-8 -*-
+# mypy: ignore-errors
+# ruff: noqa
+# fmt: off
+
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 # Copyright (c) 2025, Huawei Technologies Co., Ltd. All rights reserved.
 
@@ -229,9 +232,8 @@ def solve_tril(
     cu_seqlens: Optional[torch.Tensor] = None,
     output_dtype: torch.dtype = torch.float
 ) -> torch.Tensor:
-    """
-    Compute the inverse of the matrix I + A
-    A should be strictly lower triangular, i.e., A.triu() == 0.
+    """Compute the inverse of the matrix I + A A should be strictly lower
+    triangular, i.e., A.triu() == 0.
 
     Args:
         A (torch.Tensor):

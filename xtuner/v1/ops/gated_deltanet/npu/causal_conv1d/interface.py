@@ -1,6 +1,6 @@
 """Ascend causal convolution autograd interface."""
 
-from typing import Dict, Optional
+from typing import Mapping, Optional
 
 import torch
 
@@ -18,9 +18,9 @@ class CausalConv1dFunction(torch.autograd.Function):
         bias: Optional[torch.Tensor] = None,
         residual: Optional[torch.Tensor] = None,
         initial_state: Optional[torch.Tensor] = None,
-        activation: str = None,
+        activation: Optional[str] = None,
         cu_seqlens: Optional[torch.Tensor] = None,
-        chunk_indices: Dict[str, Optional[torch.LongTensor]] = None,
+        chunk_indices: Optional[Mapping[str, Optional[torch.Tensor]]] = None,
         output_final_state: bool = False,
     ):
         weight = weight.transpose(-1, -2).contiguous()
@@ -83,9 +83,9 @@ def causal_conv1d_triton_native(
     bias: Optional[torch.Tensor] = None,
     residual: Optional[torch.Tensor] = None,
     initial_state: Optional[torch.Tensor] = None,
-    activation: str = None,
+    activation: Optional[str] = None,
     cu_seqlens: Optional[torch.Tensor] = None,
-    chunk_indices: Dict[str, Optional[torch.LongTensor]] = None,
+    chunk_indices: Optional[Mapping[str, Optional[torch.Tensor]]] = None,
     output_final_state: bool = False,
 ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
     """Run the NPU-native causal convolution.
@@ -121,7 +121,7 @@ def causal_conv1d_triton(
     cu_seqlens_list: Optional[list[int]] = None,
     seq_idx: Optional[torch.Tensor] = None,
     cu_seqlens_int64: Optional[torch.Tensor] = None,
-    chunk_indices: Optional[Dict[str, torch.Tensor]] = None,
+    chunk_indices: Optional[Mapping[str, torch.Tensor]] = None,
 ) -> torch.Tensor:
     """Apply NPU causal-conv with a ``[B, T, H, K]`` public layout."""
     if x.ndim != 4:

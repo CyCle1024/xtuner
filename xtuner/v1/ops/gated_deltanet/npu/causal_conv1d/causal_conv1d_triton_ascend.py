@@ -1,3 +1,6 @@
+# mypy: ignore-errors
+# ruff: noqa
+# fmt: off
 """Modified from
 https://github.com/XPU-Forces/mojo_opset/blob/c05b534455d5462daa5ba8073cabd980e5f76ab8/mojo_opset/backends/ttx/kernels/npu/convolution.py
 """
@@ -21,7 +24,8 @@ def input_guard(
     make_contiguous: bool = True,
     auto_to_device: bool = True,
 ) -> Callable[[Callable[..., torch.Tensor]], Callable[..., torch.Tensor]]:
-    """Make tensor inputs contiguous and run the wrapped function on their NPU device."""
+    """Make tensor inputs contiguous and run the wrapped function on their NPU
+    device."""
 
     def decorator(fn: Callable[..., torch.Tensor]) -> Callable[..., torch.Tensor]:
         @functools.wraps(fn)
@@ -935,13 +939,13 @@ def causal_conv1d_update_kernel_bdt_fwd(
     weight_ptr,  # [D, W]
     bias_ptr,
     conv_state_indices_ptr,
-    out_ptr,  # [B, D, OT]
+    out_ptr,  # [B, D, T_OUT]
     batch: tl.constexpr,
     dim: tl.constexpr,
     state_len: tl.constexpr,  # ST
     seq_len: tl.constexpr,  # T
     width: tl.constexpr,  # W
-    out_len: tl.constexpr,  # OT
+    out_len: tl.constexpr,  # T_OUT
     x_batch_stride: tl.constexpr,
     conv_batch_stride: tl.constexpr,
     out_batch_stride: tl.constexpr,

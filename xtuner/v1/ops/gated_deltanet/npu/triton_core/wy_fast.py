@@ -1,4 +1,7 @@
-# -*- coding: utf-8 -*-
+# mypy: ignore-errors
+# ruff: noqa
+# fmt: off
+
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 # Copyright (c) 2024, Huawei Technologies Co., Ltd.  All rights reserved.
 

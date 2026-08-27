@@ -1,4 +1,7 @@
-# -*- coding: utf-8 -*-
+# mypy: ignore-errors
+# ruff: noqa
+# fmt: off
+
 # Copyright c) 2023-2025 Songlin Yang Yu Zhang
 
 from typing import Optional

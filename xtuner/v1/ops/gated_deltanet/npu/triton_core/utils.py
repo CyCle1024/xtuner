@@ -1,4 +1,7 @@
-# -*- coding: utf-8 -*-
+# mypy: ignore-errors
+# ruff: noqa
+# fmt: off
+
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 # Copyright (c) 2024, Huawei Technologies Co., Ltd.  All rights reserved.
 
@@ -28,8 +31,8 @@ FLA_CI_ENV = os.getenv("FLA_CI_ENV") == "1"
 def tensor_cache(
     fn: Callable[..., torch.Tensor]
 ) -> Callable[..., torch.Tensor]:
-    """
-    A decorator that caches the most recent result of a function with tensor inputs.
+    """A decorator that caches the most recent result of a function with tensor
+    inputs.
 
     This decorator will store the output of the decorated function for the most recent set of input tensors.
     If the function is called again with the same input tensors, it will return the cached result.
@@ -96,8 +99,8 @@ def prepare_chunk_indices_list(
         num_chunks = (length + chunk_size - 1) // chunk_size
         
         for chunk_id in range(num_chunks):
-            indices.append((i))
-            indices.append((chunk_id))
+            indices.append(i)
+            indices.append(chunk_id)
             
     return indices
 
@@ -133,10 +136,9 @@ elif hasattr(triton.language, 'make_tensor_descriptor'):
     # For Triton 3.4.x and later
     make_tensor_descriptor = triton.language.make_tensor_descriptor
 else:
-    """
-    Fallback implementation when TMA is not supported.
-    Returns None to indicate TMA descriptors are unavailable.
-    Just make triton compiler happy.
+    """Fallback implementation when TMA is not supported.
+
+    Returns None to indicate TMA descriptors are unavailable. Just make triton compiler happy.
     """
 
 
@@ -208,9 +210,8 @@ else:
 def input_guard(
     fn: Callable[..., torch.Tensor]
 ) -> Callable[..., torch.Tensor]:
-    """
-    A decorator to make sure all input tensors are contiguous and set the device based on input tensors.
-    """
+    """A decorator to make sure all input tensors are contiguous and set the
+    device based on input tensors."""
 
     @functools.wraps(fn)
     def wrapper(*args, **kwargs):

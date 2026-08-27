@@ -1,4 +1,7 @@
-# -*- coding: utf-8 -*-
+# mypy: ignore-errors
+# ruff: noqa
+# fmt: off
+
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
 from typing import Optional
@@ -359,8 +362,7 @@ def chunk_scaled_dot_kkt_fwd(
     chunk_size: int = 64,
     output_dtype: torch.dtype = torch.float32
 ) -> torch.Tensor:
-    r"""
-    Compute beta * K * K^T.
+    r"""Compute beta * K * K^T.
 
     Args:
         k (torch.Tensor):

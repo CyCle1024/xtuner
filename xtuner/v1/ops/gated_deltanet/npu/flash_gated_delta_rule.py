@@ -2,7 +2,7 @@
 # Copyright (c) 2025, HUAWEI CORPORATION.  All rights reserved.
 
 import os
-from typing import Dict, Optional
+from typing import Mapping, Optional
 
 import torch
 import torch_npu
@@ -31,29 +31,40 @@ def flash_chunk_gated_delta_rule_fwd(
     g: torch.Tensor,
     beta: torch.Tensor,
     scale: float,
-    initial_state: torch.Tensor,
+    initial_state: Optional[torch.Tensor],
     output_final_state: bool,
-    cu_seqlens: Optional[torch.LongTensor] = None,
+    cu_seqlens: Optional[torch.Tensor] = None,
     cu_seqlens_list: Optional[list[int]] = None,
-    chunk_indices: Dict[str, Optional[torch.LongTensor]] = None,
-    chunk_indices_list: Dict[str, Optional[list[int]]] = None,
+    chunk_indices: Optional[Mapping[str, torch.Tensor]] = None,
+    chunk_indices_list: Optional[Mapping[str, list[int]]] = None,
     chunk_size: int = 64,
 ):
+    if chunk_indices is None or chunk_indices_list is None:
+        raise ValueError("NPU flash gated delta-rule requires prepared chunk metadata")
     g = chunk_local_cumsum(
-        g, chunk_size=chunk_size, cu_seqlens=cu_seqlens, chunk_indices_out=chunk_indices, head_first=False
+        g,
+        chunk_size=chunk_size,
+        cu_seqlens=cu_seqlens,
+        chunk_indices_out=chunk_indices,  # type: ignore[arg-type]
+        head_first=False,
     )
     # obtain WY representation. u is actually the new v.
     A = chunk_scaled_dot_kkt_fwd(
         k=k,
         g=g,
         beta=beta,
-        cu_seqlens=cu_seqlens,
+        cu_seqlens=cu_seqlens,  # type: ignore[arg-type]
         chunk_indices=chunk_indices[str(chunk_size)],
         chunk_size=chunk_size,
         output_dtype=torch.float32,
     )
 
-    A = solve_tril(A=A, cu_seqlens=cu_seqlens, chunk_indices_out=chunk_indices, output_dtype=k.dtype)
+    A = solve_tril(
+        A=A,
+        cu_seqlens=cu_seqlens,
+        chunk_indices_out=chunk_indices,  # type: ignore[arg-type]
+        output_dtype=k.dtype,
+    )
     g = g.transpose(1, 2).contiguous()
     beta = beta.transpose(1, 2).contiguous().float()
     A = A.transpose(1, 2).contiguous()
@@ -104,15 +115,17 @@ def flash_chunk_gated_delta_rule_bwd(
     beta: torch.Tensor,
     A: torch.Tensor,
     scale: float,
-    initial_state: torch.Tensor,
+    initial_state: Optional[torch.Tensor],
     do: torch.Tensor,
     dht: torch.Tensor,
-    cu_seqlens: Optional[torch.LongTensor] = None,
+    cu_seqlens: Optional[torch.Tensor] = None,
     cu_seqlens_list: Optional[list[int]] = None,
-    chunk_indices: Dict[str, Optional[torch.LongTensor]] = None,
-    chunk_indices_list: Dict[str, Optional[list[int]]] = None,
+    chunk_indices: Optional[Mapping[str, torch.Tensor]] = None,
+    chunk_indices_list: Optional[Mapping[str, list[int]]] = None,
     chunk_size: int = 64,
 ):
+    if chunk_indices is None or chunk_indices_list is None:
+        raise ValueError("NPU flash gated delta-rule requires prepared chunk metadata")
     g = g.transpose(1, 2).contiguous()
     beta = beta.transpose(1, 2).contiguous().float()
     w, u = torch_npu.npu_recompute_w_u_fwd(
@@ -229,7 +242,7 @@ def flash_chunk_gated_delta_rule_bwd(
         chunk_size=chunk_size,
         reverse=True,
         cu_seqlens=cu_seqlens,
-        chunk_indices_out=chunk_indices,
+        chunk_indices_out=chunk_indices,  # type: ignore[arg-type]
         head_first=False,
     )
 
@@ -248,12 +261,12 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
         g: torch.Tensor,
         beta: torch.Tensor,
         scale: float,
-        initial_state: torch.Tensor,
+        initial_state: Optional[torch.Tensor],
         output_final_state: bool,
-        cu_seqlens: Optional[torch.LongTensor] = None,
+        cu_seqlens: Optional[torch.Tensor] = None,
         cu_seqlens_list: Optional[list[int]] = None,
-        chunk_indices: Dict[str, Optional[torch.LongTensor]] = None,
-        chunk_indices_list: Dict[str, Optional[list[int]]] = None,
+        chunk_indices: Optional[Mapping[str, torch.Tensor]] = None,
+        chunk_indices_list: Optional[Mapping[str, list[int]]] = None,
         use_qk_l2norm_in_kernel: bool = False,
         chunk_size: int = 64,
     ):
@@ -328,14 +341,14 @@ def flash_gated_delta_rule_native(
     v: torch.Tensor,
     g: torch.Tensor,
     beta: torch.Tensor,
-    scale: float = None,
-    initial_state: torch.Tensor = None,
+    scale: Optional[float] = None,
+    initial_state: Optional[torch.Tensor] = None,
     output_final_state: bool = False,
     use_qk_l2norm_in_kernel: bool = False,
-    cu_seqlens: Optional[torch.LongTensor] = None,
+    cu_seqlens: Optional[torch.Tensor] = None,
     cu_seqlens_list: Optional[list[int]] = None,
-    chunk_indices: Dict[str, Optional[torch.LongTensor]] = None,
-    chunk_indices_list: Dict[str, Optional[list[int]]] = None,
+    chunk_indices: Optional[Mapping[str, torch.Tensor]] = None,
+    chunk_indices_list: Optional[Mapping[str, list[int]]] = None,
     chunk_size: int = int(os.environ.get("CHUNK_SIZE", "64")),
     head_first: bool = False,
 ):
@@ -473,11 +486,11 @@ def flash_gated_delta_rule(
     initial_state: Optional[torch.Tensor] = None,
     output_final_state: bool = False,
     use_qk_l2norm_in_kernel: bool = False,
-    cu_seqlens: Optional[torch.LongTensor] = None,
+    cu_seqlens: Optional[torch.Tensor] = None,
     cu_seqlens_list: Optional[list[int]] = None,
     cu_seqlens_int64: Optional[torch.Tensor] = None,
-    chunk_indices: Optional[Dict[str, torch.Tensor]] = None,
-    chunk_indices_list: Optional[Dict[str, list[int]]] = None,
+    chunk_indices: Optional[Mapping[str, torch.Tensor]] = None,
+    chunk_indices_list: Optional[Mapping[str, list[int]]] = None,
 ):
     """Run NPU gated delta-rule with canonical ``[B, T, H, D]`` Q/K/V.
 
