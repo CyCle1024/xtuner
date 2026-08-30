@@ -1574,6 +1574,7 @@ def zeropower_via_newtonschulz5(G: Tensor, epsilon: float = 1e-7, num_experts: i
     ]
 
     X = G.to(dtype=torch.bfloat16)
+    original_shape = X.shape
 
     # Unified handling: reshape to (num_experts, M, N) for both cases
     # For regular case (num_experts=1), this adds a batch dimension of size 1
@@ -1605,6 +1606,6 @@ def zeropower_via_newtonschulz5(G: Tensor, epsilon: float = 1e-7, num_experts: i
         X = X.mT
 
     # Reshape back to original shape: (num_experts, M, N) -> (num_experts * M, N)
-    X = X.reshape(num_experts * X.size(-2), X.size(-1))
+    X = X.view(original_shape)
 
     return X

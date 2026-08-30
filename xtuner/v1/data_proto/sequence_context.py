@@ -1,5 +1,4 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-import itertools
 from dataclasses import dataclass
 from typing import cast
 
@@ -241,9 +240,10 @@ class SequenceContext:
         for ids in input_ids:
             assert ids.shape[0] == 1, "input_ids must have batch size of 1"
         num_tokens = [x.numel() for x in input_ids]
-        cu_seq_lens_list = [0, *itertools.accumulate(num_tokens)]
+        cu_seq_lens_cpu = torch.cumsum(torch.LongTensor([0] + num_tokens), dim=0)
+        cu_seq_lens_list = cu_seq_lens_cpu.tolist()
 
-        cu_seq_lens = cast(torch.IntTensor, torch.tensor(cu_seq_lens_list, dtype=torch.int32, device=device))
+        cu_seq_lens = cast(torch.IntTensor, cu_seq_lens_cpu.to(device).int())
         return cls(
             input_ids=cast(torch.LongTensor, torch.cat(input_ids, dim=1).to(device)),
             cu_seq_lens_k=cu_seq_lens,
@@ -294,10 +294,7 @@ class SequenceContext:
                 new_cu_seq_lens = self.cu_seq_lens_q.clone()
                 new_cu_seq_lens_list = self.cu_seq_lens_q_list.copy()
             new_cu_seq_lens = cast(torch.IntTensor, new_cu_seq_lens)
-            max_seq_length = max(
-                end - start for start, end in zip(self.cu_seq_lens_q_list, self.cu_seq_lens_q_list[1:])
-            )
-            new_max_length = max(max_seq_length, new_padding)
+            new_max_length = cast(int, max(self.seq_lens_q.max().item(), new_padding))
             num_non_padding = self.input_ids.shape[1] - self.num_padding
             start = sp_input_ids.shape[1] * sequence_parallel_mesh.get_local_rank()
             end = start + sp_input_ids.shape[1]

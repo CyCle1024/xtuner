@@ -121,7 +121,7 @@ class Qwen3VLTextMoE(Qwen3MoE):
         # Hoisted out of the per-layer accumulate path: mask is constant across layers.
         nonpad_indices = seq_ctx.nonpad_indices
         non_pad_token = nonpad_indices.numel()
-        num_tokens_global, z_world_size = self._z_loss_dist_token_count(z_ctx, non_pad_token, nonpad_indices.device)
+        num_tokens_global, z_world_size = self._z_loss_dist_token_count(z_ctx, non_pad_token, seq_ctx.mask.device)
 
         # =====================================================
         deepstack_visual_embeds = seq_ctx.deepstack_visual_embeds

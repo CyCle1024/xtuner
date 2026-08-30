@@ -16,6 +16,7 @@ XTuner path (compile-friendly custom_op wraps + seq_idx-aware kernel dispatch).
 """
 
 import os
+from functools import lru_cache
 
 import torch
 
@@ -84,6 +85,32 @@ def get_causal_conv1d_fn():
     from .causal_conv1d import causal_conv1d as _xtuner_causal_conv1d_fn
 
     return _xtuner_causal_conv1d_fn
+
+
+@lru_cache
+def get_rms_norm_gated_cls() -> type[torch.nn.Module]:
+    """Return the GatedDeltaNet RMSNorm class for the current device."""
+    if get_device() == "npu":
+        from .npu.rms_norm_gated import NpuRMSNormGated
+
+        return NpuRMSNormGated
+    from .rms_norm_gated import FusedRMSNormGated
+
+    return FusedRMSNormGated
+
+
+@lru_cache
+def _get_optional_rms_norm_gated_cls() -> type[torch.nn.Module] | None:
+    try:
+        return get_rms_norm_gated_cls()
+    except (ImportError, ModuleNotFoundError):
+        return None
+
+
+def is_rms_norm_gated_module(module: torch.nn.Module) -> bool:
+    """Whether ``module`` is the selected device's GatedDeltaNet RMSNorm."""
+    rms_norm_gated_cls = _get_optional_rms_norm_gated_cls()
+    return rms_norm_gated_cls is not None and isinstance(module, rms_norm_gated_cls)
 
 
 def prepare_gated_deltanet_metadata(

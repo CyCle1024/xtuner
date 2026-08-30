@@ -848,9 +848,7 @@ class MoE(BaseModel):
                     seq_ctx=seq_ctx,
                 )
             else:
-                if int(os.getenv("XTUNER_ACTIVATION_OFFLOAD", "0")) == 1 and (
-                    self.mtp_block is None or (self.mtp_block is not None and int(idx) > 0)
-                ):
+                if int(os.getenv("XTUNER_ACTIVATION_OFFLOAD", "0")) == 1:
                     with async_save_on_cpu(
                         h2d_stream=self.offload_stream,
                         d2h_stream=self.offload_stream,
@@ -1319,19 +1317,17 @@ class MoE(BaseModel):
             last_decoder_layer = list(self.layers.values())[-1]
             last_decoder_layer.set_modules_to_forward_prefetch([first_mtp_layer])  # type: ignore
 
-            # Shared-weight MTP reuses one physical FSDP layer at every logical depth. A static
-            # forward-prefetch hook on that layer would therefore materialize the LM head after
-            # the first depth and keep it resident for all remaining depths. We intentionally
-            # leave the first post-MTP LM-head call to unshard on demand for now. A future
-            # optimization can explicitly prefetch the LM head in MTPBlock only after its final
-            # logical depth finishes.
-            if not mtp_config.share_weights:
-                # MTP outputs are projected by the shared LM head before the main LM branch,
-                # so non-shared MTP can safely prefetch it from the last physical MTP layer.
+            # Non-shared MTP prefetches the LM head from its distinct final physical layer and
+            # overlaps the all-gather with the final logical depth. Shared-weight MTP has only
+            # one physical layer, so the same static hook fires at the first logical depth and
+            # keeps the full LM-head weight resident throughout the remaining MTP forward. Set
+            # disable_lm_head_prefetch=True to trade the overlap for lower memory residency in
+            # either mode and let the first MTP LM-head call unshard on demand.
+            if not mtp_config.disable_lm_head_prefetch:
                 self.mtp_block.layers[-1].set_modules_to_forward_prefetch([self.lm_head])  # type: ignore
         else:
             last_decoder_layer = list(self.layers.values())[-1]
-            last_decoder_layer.set_modules_to_forward_prefetch([self.lm_head])  # type: ignore
+            last_decoder_layer.set_modules_to_forward_prefetch([self.norm, self.lm_head])  # type: ignore
 
         self._fully_shard(
             mesh=self.fsdp_mesh if self.hsdp_mesh is None else self.hsdp_mesh,

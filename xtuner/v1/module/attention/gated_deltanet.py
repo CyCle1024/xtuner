@@ -15,7 +15,7 @@ from xtuner.v1.float8.config import Float8Config
 from xtuner.v1.ops.comm.all_to_all import ulysses_all_to_all
 from xtuner.v1.utils import get_logger
 
-from ...ops.gated_deltanet import get_causal_conv1d_fn, get_chunk_gated_delta_rule_fn
+from ...ops.gated_deltanet import get_causal_conv1d_fn, get_chunk_gated_delta_rule_fn, get_rms_norm_gated_cls
 from ..linear import build_linear
 from .attn_outputs import AttnOutputs
 
@@ -60,46 +60,6 @@ def _repeat_qk_heads(x: torch.Tensor, repeats: int) -> torch.Tensor:
         return head_first.repeat_interleave(repeats, dim=1).transpose(1, 2)
     return x.repeat_interleave(repeats, dim=2)
 
-
-_fused_rms_norm_gated_import_error: ImportError | None = None
-
-try:
-    from fla.modules import FusedRMSNormGated as FLA_FusedRMSNormGated
-
-    class FusedRMSNormGated(FLA_FusedRMSNormGated):
-        def forward(
-            self,
-            x: torch.Tensor,
-            g: torch.Tensor,
-            residual: torch.Tensor | None = None,
-            prenorm: bool = False,
-            residual_in_fp32: bool = False,
-        ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-            from ...ops.gated_deltanet.rms_norm_gated import rms_norm_gated
-
-            weight = self.weight
-            if isinstance(weight, DTensor):
-                weight = weight.to_local()
-
-            return rms_norm_gated(
-                x,
-                g,
-                weight,
-                self.bias,
-                self.activation,
-                residual=residual,
-                eps=self.eps,
-                prenorm=prenorm,
-                residual_in_fp32=residual_in_fp32,
-            )
-
-except (ImportError, ModuleNotFoundError) as e:
-    has_fused_rms_norm_gated = False
-    FusedRMSNormGated = None  # type: ignore
-    _fused_rms_norm_gated_import_error = e
-else:
-    has_fused_rms_norm_gated = True
-    _fused_rms_norm_gated_import_error = None
 
 logger = get_logger()
 
@@ -189,13 +149,10 @@ class GatedDeltaNet(nn.Module):
 
         # Resolved at build time so `XTUNER_HF_IMPL` selects the HF-native fla call patterns
         # (same convention as `get_attn_impl_fn`).
-        if not has_fused_rms_norm_gated:
-            assert _fused_rms_norm_gated_import_error is not None
-            raise _fused_rms_norm_gated_import_error
-        assert FusedRMSNormGated is not None
         self.causal_conv1d_fn = get_causal_conv1d_fn()
         self.chunk_gated_delta_rule = get_chunk_gated_delta_rule_fn()
-        self.norm = FusedRMSNormGated(self.head_v_dim, eps=self.rms_norm_eps, activation=self.activation)
+        rms_norm_gated_cls = get_rms_norm_gated_cls()
+        self.norm = rms_norm_gated_cls(self.head_v_dim, eps=self.rms_norm_eps, activation=self.activation)
 
         self.out_proj = build_linear(
             self.value_dim,

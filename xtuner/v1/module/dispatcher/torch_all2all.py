@@ -526,7 +526,7 @@ class TorchAll2AllDispatcher(
         async_op: bool = False,
         decoding: bool = False,
     ) -> TorchAll2AllPreCombineResult:
-        if len(hidden_states) != 0:
+        if hidden_states.numel() != 0:
             hidden_states = unpermute(
                 hidden_states,
                 post_dispatched["row_ids_map"],
