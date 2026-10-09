@@ -1543,8 +1543,6 @@ class MoE(BaseModel):
             # keeps the full LM-head weight resident throughout the remaining MTP forward. Set
             # disable_lm_head_prefetch=True to trade the overlap for lower memory residency in
             # either mode and let the first MTP LM-head call unshard on demand.
-            if not mtp_config.disable_lm_head_prefetch:
-                self.mtp_block.layers[-1].set_modules_to_forward_prefetch([self.lm_head])  # type: ignore
         else:
             last_decoder_layer = list(self.layers.values())[-1]
             last_decoder_layer.set_modules_to_forward_prefetch([self.norm, self.lm_head])  # type: ignore
